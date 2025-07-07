@@ -6,7 +6,9 @@
 package pubsub
 
 import (
+	"context"
 	"sync"
+	"time"
 )
 
 // PubSub implements the Publish-Subscribe pattern.
@@ -65,20 +67,36 @@ func (ps *PubSub[K, T]) Unsubscribe(keys []K, ch chan T) {
 }
 
 // Publish sends a message to all channels subscribed to the specified key.
-// This is a blocking operation - it will wait for each subscriber's channel
-// to accept the message. The message is delivered to all subscribers in an
-// unspecified order.
-//
-// Warning: If any subscriber's channel is not being read from, this will
-// block indefinitely. Ensure all subscribed channels have active readers
-// or sufficient buffer space.
-func (ps *PubSub[K, T]) Publish(key K, msg T) {
+// The operation will block until all subscribers receive the message or until:
+// - The context is canceled
+// - The timeout expires (if context has a deadline)
+// Returns the number of successful deliveries and any context error encountered.
+func (ps *PubSub[K, T]) Publish(ctx context.Context, key K, msg T) (int, error) {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	if subs, exists := ps.subscribers[key]; exists {
-		for ch := range subs {
-			ch <- msg // This will block until the message is accepted
+	subs, exists := ps.subscribers[key]
+	if !exists {
+		return 0, nil
+	}
+
+	var delivered int
+	for ch := range subs {
+		select {
+		case ch <- msg:
+			delivered++
+		case <-ctx.Done():
+			return delivered, ctx.Err()
 		}
 	}
+
+	return delivered, nil
+}
+
+// PublishWithTimeout is a convenience method that creates a context with timeout.
+func (ps *PubSub[K, T]) PublishWithTimeout(key K, msg T, timeout time.Duration) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	return ps.Publish(ctx, key, msg)
 }
